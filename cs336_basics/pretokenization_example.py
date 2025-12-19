@@ -1,5 +1,9 @@
+import multiprocessing as mp
 import os
+import time
+from collections import Counter
 from typing import BinaryIO
+
 import regex as re
 
 
@@ -50,22 +54,59 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-## Usage
-with open("/Users/jesseshue/repos/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt", "rb") as f:
-    num_processes = 4
-    boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+def pretokenization_worker(filepath: str, start: int, end: int, PAT: str, special_token: str) -> Counter:
+    """
+    Worker for pretokenizing a chunk.
 
-    # The following is a serial implementation, but you can parallelize this
-    # by sending each start/end pair to a set of processes.
-    for start, end in zip(boundaries[:-1], boundaries[1:]):
+    Args:
+        filepath: file to read from.
+        start: the start index of the string to process.
+        end: the end index.
+        PAT: the regex pattern to pretokenize on.
+    """
+    start_time = time.time()
+
+    with open(filepath, "rb") as f:
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
-        # Run pre-tokenization on your chunk and store the counts for each pre-token
-        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    counter = Counter()
 
-        # split across special token (to exclude from pre-tok)
+    # split across special token (to exclude from pre-tok)
+    sub_chunks = re.split(re.escape(special_token), chunk)
 
-        # regex pretokenization
-        it = re.finditer(PAT, chunk)
-        breakpoint()
+    # go through each pretok, adding to counter.
+    for sub_chunk in sub_chunks:
+        # regex pretok with findall (works because it's a small subchunk)
+        counter.update(re.findall(PAT, sub_chunk))
 
+    print(f"pretokenized first chunk of {len(chunk)} characters in {time.time() - start_time}s.")
+
+    return counter
+
+
+def pretokenize(num_processes, filepath, special_token):
+    with open(filepath, "rb") as f:
+        boundaries = find_chunk_boundaries(f, num_processes, special_token.encode("utf-8"))
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    jobs = [(filepath, start, end, PAT, special_token) for start, end in zip(boundaries[:-1], boundaries[1:])]
+
+    # parallelize
+    with mp.Pool(processes=num_processes) as pool:
+        counters = pool.starmap(pretokenization_worker, jobs)
+
+    # merge
+    total = Counter()
+    for counter in counters:
+        total.update(counter)
+
+    return total
+
+
+## Usage
+if __name__ == "__main__":
+    num_processes = 8
+    filepath = "/Users/jesseshue/repos/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
+    special_token = "<|endoftext|>"
+
+    pretok_counter = pretokenize(num_processes, filepath, special_token)
