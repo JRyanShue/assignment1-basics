@@ -54,7 +54,7 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-def pretokenization_worker(filepath: str, start: int, end: int, PAT: str, special_token: str) -> Counter:
+def pretokenization_worker(filepath: str, start: int, end: int, PAT: str, special_tokens: list[str]) -> Counter:
     """
     Worker for pretokenizing a chunk.
 
@@ -72,24 +72,34 @@ def pretokenization_worker(filepath: str, start: int, end: int, PAT: str, specia
     counter = Counter()
 
     # split across special token (to exclude from pre-tok)
-    sub_chunks = re.split(re.escape(special_token), chunk)
+    sub_chunks = re.split("|".join(re.escape(special_token) for special_token in special_tokens), chunk)
 
     # go through each pretok, adding to counter.
     for sub_chunk in sub_chunks:
         # regex pretok with findall (works because it's a small subchunk)
-        counter.update(re.findall(PAT, sub_chunk))
-
+        counter.update(tuple(char.encode("utf-8") for char in pretok) for pretok in re.findall(PAT, sub_chunk))
+        
     print(f"pretokenized first chunk of {len(chunk)} characters in {time.time() - start_time}s.")
 
     return counter
 
 
-def pretokenize(num_processes, filepath, special_token):
+def pretokenize(num_processes: int, filepath: str, special_tokens: list[str]) -> Counter:
+    """
+
+    Returns:
+        The pretokenized data, in a Counter of form dict[tuple[bytes], int]. Example element: {(l, o, w): 5}
+    """
+
+    assert isinstance(special_tokens, list)
     with open(filepath, "rb") as f:
-        boundaries = find_chunk_boundaries(f, num_processes, special_token.encode("utf-8"))
+        if len(special_tokens) == 1:  # jusq1a t endoftext token
+            boundaries = find_chunk_boundaries(f, num_processes, special_tokens[0].encode("utf-8"))
+        else:
+            raise NotImplementedError
     PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-    jobs = [(filepath, start, end, PAT, special_token) for start, end in zip(boundaries[:-1], boundaries[1:])]
+    jobs = [(filepath, start, end, PAT, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
 
     # parallelize
     with mp.Pool(processes=num_processes) as pool:
@@ -107,6 +117,6 @@ def pretokenize(num_processes, filepath, special_token):
 if __name__ == "__main__":
     num_processes = 8
     filepath = "/Users/jesseshue/repos/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
-    special_token = "<|endoftext|>"
+    special_tokens = ["<|endoftext|>"]
 
-    pretok_counter = pretokenize(num_processes, filepath, special_token)
+    pretok_counter = pretokenize(num_processes, filepath, special_tokens)
