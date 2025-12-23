@@ -1,15 +1,26 @@
-from pretokenization_example import pretokenize
+import time
 from collections import Counter
 
+from cs336_basics.pretokenization_example import pretokenize
 
-def initialize_vocab() -> dict:
+
+def initialize_vocab(special_tokens: list[str]) -> dict:
     """
+    Args:
+        special_tokens: a list of special tokens, to add to the vocabulary
+
     Returns:
         A dict of values 0-255 mapping to their corresponding byte value
     """
+    # TODO: add special token
     vocab = {}
+    vocab_idx = -1
     for vocab_idx in range(256):
         vocab[vocab_idx] = bytes([vocab_idx])
+
+    vocab_idx += 1
+    for idx, special_token in enumerate(special_tokens):
+        vocab[vocab_idx + idx] = special_token.encode("utf-8")
 
     return vocab
 
@@ -33,8 +44,10 @@ def initialize_pairs(pretok_counter: Counter) -> Counter:
 
 def get_top_pair(pairs_counter: Counter) -> tuple[bytes]:
     """
-    Given the pair frequencies, return the highest frequency one. Break ties lexicographically (return higher one).
+    Given the pair frequencies, return the highest frequency one, and its frequency. Break ties lexicographically (return higher one).
     """
+    if len(pairs_counter) == 1:
+        breakpoint()
 
     highest_freq = max(pairs_counter.values())
     highest_freq_pairs = [pair for pair, freq in pairs_counter.items() if freq == highest_freq]
@@ -43,6 +56,39 @@ def get_top_pair(pairs_counter: Counter) -> tuple[bytes]:
         return max(highest_freq_pairs)
     else:
         return highest_freq_pairs[0]
+
+
+def merge_pretok(pretok: tuple[bytes], pair: tuple[bytes]) -> tuple[tuple[bytes], bytes, tuple[tuple]]:
+    """
+    Merge items in pretoken given the pair to look for.
+
+    Args:
+        pretok: the pretoken to perform merging on
+        pair: the pair of tokens within the pretoken to merge
+
+    Returns:
+        merged_pretok: a tuple[bytes], the pretoken with instances of pair merged
+        new_vocab: a bytes object, the new vocabulary token used to merge
+        merged_idxs: the indexes from the original pretoken that were replaced
+    """
+
+    matches = []
+    for i in range(1 + len(pretok) - 2):
+        if pretok[i : i + 2] == pair:
+            matches.append((i, i + 2))
+    if not matches:
+        return None, None, None
+
+    # merge in O(N)
+    i, last_j = None, 0
+    new_vocab = b"".join(pair)
+    pieces = []
+    for match in matches:
+        i, j = match
+        pieces.append(pretok[last_j:i] + (new_vocab,))
+        last_j = j
+    pieces.append(pretok[last_j:])
+    return tuple(x for p in pieces for x in p), new_vocab, tuple(x for i, j in matches for x in (i, j - 1))
 
 
 def train_bpe_tokenizer(input_path: str, vocab_size: int, special_tokens: list[str]) -> tuple:
@@ -56,17 +102,21 @@ def train_bpe_tokenizer(input_path: str, vocab_size: int, special_tokens: list[s
         vocab: dict[int, bytes]: tokenizer vocabulary, mapping from token id to token bytes
         merges: list[tuple[bytes, bytes]]
     """
+    start_time = time.time()
 
-    vocab = initialize_vocab()
+    vocab = initialize_vocab(special_tokens=special_tokens)
     vocab_idx = len(vocab) - 1
+    merges = []
 
-    pretok_counter = pretokenize(num_processes=8, filepath=input_path, special_tokens=special_tokens)
+    pretok_counter = pretokenize(num_processes=4, filepath=input_path, special_tokens=special_tokens)
+    print(f"time to pretokenize: {time.time() - start_time}")
     pairs_counter = initialize_pairs(pretok_counter)
 
     while len(vocab) < vocab_size:
         highest_freq_pair = get_top_pair(pairs_counter)
 
         # add to vocab
+        print(f"Adding to vocab: {b''.join(highest_freq_pair)}")
         vocab[vocab_idx + 1] = b"".join(highest_freq_pair)
         vocab_idx += 1
 
@@ -77,77 +127,55 @@ def train_bpe_tokenizer(input_path: str, vocab_size: int, special_tokens: list[s
             if pretok_len < 2:
                 continue
 
-            # find all matches first, in case there are multiple for one pretoken
-            matches = []
-            for i in range(1 + pretok_len - 2):
-                if pretok[i : i + 2] == highest_freq_pair:
-                    matches.append((i, i + 2))
-            if not matches:
+            merged_pretok, new_vocab, merged_idxs = merge_pretok(pretok, pair=highest_freq_pair)
+            if not merged_pretok:  # match not found
                 continue
+            # add to merges
+            merges.append(highest_freq_pair)
 
             # if match: keep frequency for later.
             pretok_freq = pretok_counter.pop(pretok)
 
-            # merge in O(N)
-            i, j, last_j = None, None, 0
-            new_vocab = vocab[vocab_idx]
-            pieces = []
-            for match in matches:
-                i, j = match
-                pieces.append(pretok[last_j:i] + (new_vocab,))
-                last_j = j
+            if len(merged_pretok) == 1:
+                # there are no new pairs, just a loss of the pair for this pretoken. so rename pretoken and move on.
+                pretok_counter[merged_pretok] = pretok_freq
+                continue
 
-                """
-                For each changed pair, update pairs counter. 
-                When we merge, we get rid of any overlapping pairs.
+            # get new pairs (to increment in the pairs counter), and old pairs (to decrement)
+            new_vocab_idxs = [i for i, v in enumerate(merged_pretok) if v == new_vocab]
+            new_pairs_idxs = set()
+            old_pairs_idxs = set()
 
-                We replace them with new pairs containing the new token (if eligible)
-                """
-                if i > 0:
-                    # new pair: the token plus the item on the left
-                    # if (pretok[i - 1], new_vocab) in [(b'e', b'ed'), (b'ed', b'e'), (b'ed', b'ed')]:
-                    #     breakpoint()
+            # use the indexes, because sometimes a pair occurs multiple times in a pretoken.
+            for new_vocab_idx in new_vocab_idxs:
+                # attempt to make pairs with the left and right, and remove the old pairs
+                if new_vocab_idx > 0:
+                    new_pairs_idxs.add((new_vocab_idx - 1, new_vocab_idx))
+                    # old_pairs_idxs.add()
+                if new_vocab_idx < len(merged_pretok) - 1:
+                    new_pairs_idxs.add((new_vocab_idx, new_vocab_idx + 1))
 
-                    if pretok == (b" ", b"n", b"e", b"e", b"d", b"e", b"d"):
-                        breakpoint()
-                    pairs_counter[(pretok[i - 1], new_vocab)] += pretok_freq
-                    print("i > 0")
+            for i, j in new_pairs_idxs:
+                # print(f'adding {pretok_freq} to {(merged_pretok[i], merged_pretok[j])}')
+                pairs_counter[(merged_pretok[i], merged_pretok[j])] += pretok_freq
 
-                    # remove old pairs
-                    # if (pretok[i - 1], pretok[i]) == (b'ed', b'ed'):
-                    #     breakpoint()
-                    pairs_counter[(pretok[i - 1], pretok[i])] -= pretok_freq
-                if j < pretok_len:
-                    # new pair: the token plus the item on the right
-                    # if (new_vocab, pretok[i + 2]) in [(b'e', b'ed'), (b'ed', b'e'), (b'ed', b'ed')]:
-                    #     breakpoint()
-                    pairs_counter[(new_vocab, pretok[i + 2])] += pretok_freq
-                    print("i + 2 < pretok_len")
+            # old pairs
+            for merged_idx in merged_idxs:
+                if merged_idx > 0:
+                    old_pairs_idxs.add((merged_idx - 1, merged_idx))
+                if merged_idx < len(pretok) - 1:
+                    old_pairs_idxs.add((merged_idx, merged_idx + 1))
 
-                    # remove old
-                    # if (pretok[i + 2 - 1], pretok[i + 2]) == (b'ed', b'ed'):
-                    #     breakpoint()
-                    pairs_counter[(pretok[i + 2 - 1], pretok[i + 2])] -= pretok_freq
-            # Add end
-            pieces.append(pretok[j:])
-            merged_pretok = tuple(x for p in pieces for x in p)
+            for i, j in old_pairs_idxs:
+                # print(f'subtracting {pretok_freq} from {(pretok[i], pretok[j])}')
+                pairs_counter[(pretok[i], pretok[j])] -= pretok_freq
 
             # rename pretok counter to merged pretok
             pretok_counter[merged_pretok] = pretok_freq
 
-            print(f"Matched {highest_freq_pair} in {pretok}. Turned it into {merged_pretok}.")
-
-            if pretok == (b" ", b"c", b"h", b"e", b"r", b"i", b"s", b"h", b"e", b"d"):
-                print("yeuye")
-                breakpoint()
-
         # pop pair once we're done
-
-        # breakpoint()
         pairs_counter.pop(highest_freq_pair)
 
-        # Update pairs
-
-        # breakpoint()
-
-    breakpoint()
+    print(f"Total time for BPE training (vocab size {vocab_size}): {time.time() - start_time}")
+    # breakpoint()
+    return vocab, merges
