@@ -46,9 +46,6 @@ def get_top_pair(pairs_counter: Counter) -> tuple[bytes]:
     """
     Given the pair frequencies, return the highest frequency one, and its frequency. Break ties lexicographically (return higher one).
     """
-    if len(pairs_counter) == 1:
-        breakpoint()
-
     highest_freq = max(pairs_counter.values())
     highest_freq_pairs = [pair for pair, freq in pairs_counter.items() if freq == highest_freq]
 
@@ -116,9 +113,11 @@ def train_bpe_tokenizer(input_path: str, vocab_size: int, special_tokens: list[s
         highest_freq_pair = get_top_pair(pairs_counter)
 
         # add to vocab
-        print(f"Adding to vocab: {b''.join(highest_freq_pair)}")
         vocab[vocab_idx + 1] = b"".join(highest_freq_pair)
         vocab_idx += 1
+
+        # add to merges
+        merges.append(highest_freq_pair)
 
         # update pretok data
         # pair length is always 2.
@@ -130,8 +129,6 @@ def train_bpe_tokenizer(input_path: str, vocab_size: int, special_tokens: list[s
             merged_pretok, new_vocab, merged_idxs = merge_pretok(pretok, pair=highest_freq_pair)
             if not merged_pretok:  # match not found
                 continue
-            # add to merges
-            merges.append(highest_freq_pair)
 
             # if match: keep frequency for later.
             pretok_freq = pretok_counter.pop(pretok)

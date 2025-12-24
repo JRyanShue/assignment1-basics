@@ -77,7 +77,7 @@ def pretokenization_worker(filepath: str, start: int, end: int, PAT: str, specia
     # go through each pretok, adding to counter.
     for sub_chunk in sub_chunks:
         # regex pretok with findall (works because it's a small subchunk)
-        counter.update(tuple(char.encode("utf-8") for char in pretok) for pretok in re.findall(PAT, sub_chunk))
+        counter.update(tuple(bytes([byte]) for byte in pretok.encode("utf-8")) for pretok in re.findall(PAT, sub_chunk))
         
     print(f"pretokenized first chunk of {len(chunk)} characters in {time.time() - start_time}s.")
 
