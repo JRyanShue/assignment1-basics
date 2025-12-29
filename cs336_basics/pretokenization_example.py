@@ -1,10 +1,19 @@
+import gzip
 import multiprocessing as mp
 import os
+import shutil
+import tempfile
 import time
 from collections import Counter
+from math import ceil
+from pathlib import Path
 from typing import BinaryIO
 
 import regex as re
+from mpmath.libmp.libmpi import MAX
+
+# Limit chunk size to not explode memory
+MAX_CHUNK_LEN = 100000000
 
 
 def find_chunk_boundaries(
@@ -54,9 +63,11 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-def pretokenization_worker(filepath: str, start: int, end: int, PAT: str, special_tokens: list[str]) -> Counter:
+def pretokenization_worker(chunk_idx: int, filepath: str, start: int, end: int, PAT: str, special_tokens: list[str]) -> Counter:
     """
     Worker for pretokenizing a chunk.
+
+    Will split it into sub-chunks first.
 
     Args:
         filepath: file to read from.
@@ -78,8 +89,8 @@ def pretokenization_worker(filepath: str, start: int, end: int, PAT: str, specia
     for sub_chunk in sub_chunks:
         # regex pretok with findall (works because it's a small subchunk)
         counter.update(tuple(bytes([byte]) for byte in pretok.encode("utf-8")) for pretok in re.findall(PAT, sub_chunk))
-        
-    print(f"pretokenized first chunk of {len(chunk)} characters in {time.time() - start_time}s.")
+
+    print(f"pretokenized chunk {chunk_idx} of {len(chunk)} characters in {time.time() - start_time}s.")
 
     return counter
 
@@ -92,25 +103,55 @@ def pretokenize(num_processes: int, filepath: str, special_tokens: list[str]) ->
     """
 
     assert isinstance(special_tokens, list)
-    with open(filepath, "rb") as f:
-        if len(special_tokens) == 1:  # jusq1a t endoftext token
-            boundaries = find_chunk_boundaries(f, num_processes, special_tokens[0].encode("utf-8"))
-        else:
-            raise NotImplementedError
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-    jobs = [(filepath, start, end, PAT, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
+    # First -- if .gz file, decompress into a tempfile
+    path = Path(filepath)
+    suffixes = path.suffixes
+    if suffixes == [".txt", ".gz"]:
+        print(f"Decompressing {filepath} to tempfile...")
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".txt", delete=False) as tmp:
+            tmp_path = tmp.name
+            with gzip.open(filepath, "rb") as gz:
+                shutil.copyfileobj(gz, tmp)
+        filepath = tmp_path
+        cleanup_tmp = True
+        print(f"Decompressed to {filepath}.")
+    else:
+        cleanup_tmp = False
 
-    # parallelize
-    with mp.Pool(processes=num_processes) as pool:
-        counters = pool.starmap(pretokenization_worker, jobs)
+    try:
+        # Get size of file, decide on number of chunks
+        filesize = os.path.getsize(filepath)
 
-    # merge
-    total = Counter()
-    for counter in counters:
-        total.update(counter)
+        # divide equally among the processes, so that each chunk is no more than the max chunk len
+        num_chunks = num_processes * max(1, ceil(filesize / (MAX_CHUNK_LEN * num_processes)))
 
-    return total
+        with open(filepath, "rb") as f:
+            if len(special_tokens) == 1:  # jusq1a t endoftext token
+                boundaries = find_chunk_boundaries(
+                    f, desired_num_chunks=num_chunks, split_special_token=special_tokens[0].encode("utf-8")
+                )
+            else:
+                raise NotImplementedError
+        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+        jobs = [(chunk_idx, filepath, start, end, PAT, special_tokens) for chunk_idx, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:]))]
+
+        # parallelize
+        with mp.Pool(processes=num_processes) as pool:
+            counters = pool.starmap(pretokenization_worker, jobs)
+
+        # merge
+        total = Counter()
+        for counter in counters:
+            total.update(counter)
+
+        return total
+
+    # cleanup
+    finally:
+        if cleanup_tmp:
+            os.unlink(tmp_path)
 
 
 ## Usage
